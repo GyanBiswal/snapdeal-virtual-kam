@@ -61,8 +61,9 @@ CONVERSATION FLOW
 
 OUTPUT FORMAT
 Respond with a single JSON object and nothing else:
-{"reply": "<what you say aloud>", "topic_covered": "<stockouts, cancellations, visibility, or null>", "seller_facts": ["<new facts the seller stated in their latest message>"], "recommendations_given": <true only if THIS reply contains recommendations>, "agreed_actions": ["<actions the seller agreed to in their latest message>"], "conversation_complete": <true only when the conversation is finished>}
-- topic_covered: the topic the seller's latest message answered, otherwise null.
+{"reply": "<what you say aloud>", "topic_asked": "<stockouts, cancellations, visibility, or null>", "topic_covered": "<stockouts, cancellations, visibility, or null>", "seller_facts": ["<new facts the seller stated in their latest message>"], "recommendations_given": <true only if THIS reply contains recommendations>, "agreed_actions": ["<actions the seller agreed to in their latest message>"], "conversation_complete": <true only when the conversation is finished>}
+- topic_asked: the topic that the NEW question in this reply is about, otherwise null.
+- topic_covered: the topic that the seller's latest message actually ANSWERED (the topic of your previous question), otherwise null. Never mark a topic covered just because you are asking about it now.
 - seller_facts and agreed_actions: only NEW items from the seller's latest message; use [] if none. Never put your own suggestions in seller_facts.
 """
 
@@ -85,6 +86,7 @@ class ConversationState:
     agreed_actions: list = field(default_factory=list)
     recommendations_given: bool = False
     complete: bool = False
+    pending_topic: str | None = None  # topic of the agent's last question
 
 
 # ---------- Tools (plain Python functions) ----------
@@ -130,6 +132,7 @@ Warning signals (possible factors to investigate, NOT proven causes):
 
 INVESTIGATION STATE
 Topics already covered: {covered}
+Topic of your previous question: {state.pending_topic or 'none'}
 NEXT TOPIC to investigate: {next_line}
 Facts the seller has told you:
 {facts}
@@ -259,9 +262,13 @@ class SellerAgent:
     def _update_state(self, data: dict) -> None:
         had_recommendations = self.state.recommendations_given
 
+        # A topic counts as covered only if the PREVIOUS reply asked about it
         topic = data.get("topic_covered")
-        if topic in INVESTIGATION_TOPICS:
+        if topic in INVESTIGATION_TOPICS and topic == self.state.pending_topic:
             self.state.covered_topics.add(topic)
+
+        asked = data.get("topic_asked")
+        self.state.pending_topic = asked if asked in INVESTIGATION_TOPICS else None
 
         for fact in data.get("seller_facts") or []:
             if isinstance(fact, str) and fact.strip() and fact not in self.state.seller_facts:

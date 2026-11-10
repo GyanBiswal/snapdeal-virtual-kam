@@ -19,6 +19,7 @@ def _json(reply="Test reply?", **extra):
         "recommendations_given": False,
         "agreed_actions": [],
         "conversation_complete": False,
+        "topic_asked": None,
     }
     data.update(extra)
     return json.dumps(data)
@@ -65,19 +66,22 @@ def test_missing_api_key(monkeypatch):
     assert not result.ok and result.error_type == "missing_api_key"
 
 
-def test_successful_turn_updates_state_and_history():
-    client = FakeClient([_json(
-        "Are any of them your best sellers?",
-        topic_covered="stockouts",
-        seller_facts=["Best-sellers are out of stock"],
-    )])
+def test_topic_only_covered_after_it_was_asked():
+    client = FakeClient([
+        # Model wrongly claims "covered" in the same turn it asks the question
+        _json("Are any of them best sellers?", topic_asked="stockouts", topic_covered="stockouts"),
+        _json("Thanks. What about cancellations?", topic_asked="cancellations",
+              topic_covered="stockouts", seller_facts=["Best-sellers are out of stock"]),
+    ])
     agent = SellerAgent(client=client)
     agent.greeting()
-    result = agent.respond("Sales are down")
-    assert result.ok
+    agent.respond("Sales are down")
+    assert agent.state.covered_topics == set()  # premature claim ignored
+    agent.respond("Yes, three best-sellers are out of stock")
     assert agent.state.covered_topics == {"stockouts"}
+    assert agent.state.pending_topic == "cancellations"
     assert agent.state.seller_facts == ["Best-sellers are out of stock"]
-    assert len(agent.history) == 3  # greeting, user, assistant
+    assert len(agent.history) == 5  # greeting + 2 turns
 
 
 def test_rate_limit_falls_back_to_second_model():
