@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { display: flex; align-items: center; gap: 16px; padding: 6px 2px; flex-wrap: wrap; }
+  button { font-size: 16px; font-weight: 600; border: none; border-radius: 999px;
+    padding: 14px 22px; cursor: pointer; color: #fff; background: #1a73e8; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  button.listening { background: #d93025; animation: pulse 1.2s infinite; }
+  button.end { background: transparent; color: inherit; border: 1px solid #999;
+    font-size: 13px; padding: 8px 14px; font-weight: 500; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(217,48,37,.5); }
+    70% { box-shadow: 0 0 0 14px rgba(217,48,37,0); }
+    100% { box-shadow: 0 0 0 0 rgba(217,48,37,0); }
+  }
+  .info { flex: 1; min-width: 220px; }
+  #status { font-size: 15px; font-weight: 600; }
+  #heard { font-size: 14px; opacity: .8; margin-top: 4px; min-height: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <button id="main">📞 Start voice call</button>
+  <div class="info">
+    <div id="status">Click the button to start a voice call with your KAM.</div>
+    <div id="heard"></div>
+  </div>
+  <button id="end" class="end" style="display:none">End call</button>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const log = (...a) => console.log("[KAM voice]", ...a);
+
+  // ---------- Streamlit component protocol (no build step needed) ----------
+  function post(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+  }
+  const Streamlit = {
+    ready: () => post("streamlit:componentReady", { apiVersion: 1 }),
+    setHeight: (h) => post("streamlit:setFrameHeight", { height: h }),
+    setValue: (v) => post("streamlit:setComponentValue", { value: v, dataType: "json" }),
+  };
+
+  // ---------- Elements & state ----------
+  const mainBtn = document.getElementById("main");
+  const endBtn = document.getElementById("end");
+  const statusEl = document.getElementById("status");
+  const heardEl = document.getElementById("heard");
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const LANG = "en-IN";
+
+  let args = { greeting: "", speak_text: "", speak_id: 0, epoch: 0 };
+  let initialised = false;
+  let lastSpokenId = 0;
+  let lastEpoch = 0;
+  let state = "idle";
+  let callActive = false;
+  let recognition = null;
+  let finalText = "";
+  let sent = false;
+  let recError = null;
+  let speakToken = 0;
+  let processingTimer = null;
+
+  const LABELS = {
+    idle: "📞 Start voice call",
+    ready: "🎤 Tap to speak",
+    listening: "⏹ Stop listening",
+    processing: "⏳ Thinking…",
+    speaking: "🔊 Tap to interrupt & speak",
+  };
+  const STATUS = {
+    idle: "Click the button to start a voice call with your KAM.",
+    ready: "Your turn. Tap the mic and speak, or type below.",
+    listening: "🎙️ Listening… speak now.",
+    processing: "Thinking…",
+    speaking: "🔊 KAM is speaking…",
+  };
+  const MIC_BLOCKED =
+    "Microphone access is blocked. Click the 🔒 icon in Chrome's address bar, allow the microphone, and reload. " +
+    "Also check macOS System Settings → Privacy & Security → Microphone. You can type below meanwhile.";
+
+  function uid() { return Date.now() + "-" + Math.random().toString(36).slice(2, 10); }
+  function resize() { Streamlit.setHeight(document.querySelector(".wrap").offsetHeight + 12); }
+
+  function setState(s, msg) {
+    state = s;
+    statusEl.textContent = msg || STATUS[s];
+    mainBtn.textContent = LABELS[s];
+    mainBtn.disabled = (s === "processing");
+    mainBtn.classList.toggle("listening", s === "listening");
+    endBtn.style.display = callActive ? "inline-block" : "none";
+    log("state ->", s);
+    resize();
+  }
+
+  // ---------- Text-to-speech ----------
+  function cleanForSpeech(t) {
+    return String(t).replace(/[\u2010-\u2015]/g, "-").replace(/\s+/g, " ").trim();
+  }
+  function pickVoice() {
+    const voices = window.speechSynthesis.getVoices() || [];
+    const lang = (v) => (v.lang || "").replace("_", "-");
+    return voices.find((v) => lang(v) === "en-IN") ||
+           voices.find((v) => lang(v).startsWith("en")) || null;
+  }
+  function stopSpeaking() {
+    speakToken++;
+    if ("speechSynthesis" in window && (speechSynthesis.speaking || speechSynthesis.pending)) {
+      speechSynthesis.cancel();
+    }
+  }
+  function speak(text, done) {
+    if (!("speechSynthesis" in window) || !text) { if (done) done(); return; }
+    stopSpeaking();
+    const myToken = speakToken;
+    setState("speaking");
+    // Speak sentence by sentence (avoids Chrome cutting off long utterances)
+    const chunks = cleanForSpeech(text).match(/[^.!?]+[.!?]*/g) || [cleanForSpeech(text)];
+    let i = 0;
+    function next() {
+      if (myToken !== speakToken) return;            // cancelled or superseded
+      if (i >= chunks.length) { if (done) done(); return; }
+      const piece = chunks[i++].trim();
+      if (!piece) { next(); return; }
+      const u = new SpeechSynthesisUtterance(piece);
+      u.lang = LANG;
+      u.rate = 1.0;
+      const v = pickVoice();
+      if (v) u.voice = v;
+      u.onend = next;
+      u.onerror = (e) => {
+        if (e.error === "interrupted" || e.error === "canceled") return;
+        log("speech error", e.error);
+        next();
+      };
+      window.speechSynthesis.speak(u);
+    }
+    setTimeout(next, 60);
+  }
+
+  // ---------- Speech-to-text ----------
+  function stopRecognition() {
+    if (recognition) {
+      recognition.onresult = recognition.onerror = recognition.onend = recognition.onstart = null;
+      try { recognition.abort(); } catch (e) {}
+      recognition = null;
+    }
+  }
+
+  function errorMessage(err) {
+    switch (err) {
+      case "not-allowed":
+      case "service-not-allowed": return MIC_BLOCKED;
+      case "no-speech": return "I didn't hear anything. Tap the mic and try again.";
+      case "audio-capture": return "No microphone was found. Please connect one or type below.";
+      case "network": return "Chrome's speech service couldn't be reached. Check your internet connection, or type below.";
+      case "aborted": return null;
+      default: return "Voice input had a problem (" + err + "). Tap the mic to retry, or type below.";
+    }
+  }
+
+  function listen() {
+    if (!callActive) return;
+    if (!SR) {
+      setState("ready", "Voice input isn't supported in this browser. Please use Google Chrome, or type below.");
+      return;
+    }
+    stopSpeaking();
+    stopRecognition();
+    finalText = ""; sent = false; recError = null; heardEl.textContent = "";
+
+    const rec = new SR();
+    recognition = rec;
+    rec.lang = LANG;
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+
+    rec.onstart = () => setState("listening");
+    rec.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) finalText += r[0].transcript + " ";
+        else interim += r[0].transcript;
+      }
+      heardEl.textContent = "You: " + (finalText + interim).trim();
+      resize();
+    };
+    rec.onerror = (e) => { recError = e.error; log("recognition error", e.error); };
+    rec.onend = () => {
+      recognition = null;
+      const text = finalText.trim();
+      if (text && !sent) { sent = true; submit(text); return; }
+      setState("ready", (recError && errorMessage(recError)) || STATUS.ready);
+    };
+
+    try { rec.start(); }
+    catch (err) { log("start failed", err); setState("ready", "Couldn't start the microphone. Tap the mic to retry."); }
+  }
+
+  function submit(text) {
+    setState("processing");
+    heardEl.textContent = "You: " + text;
+    Streamlit.setValue({ type: "utterance", id: uid(), text: text });
+    clearTimeout(processingTimer);
+    processingTimer = setTimeout(() => {
+      if (state === "processing") setState("ready", "That took too long. Tap the mic to try again.");
+    }, 45000);
+  }
+
+  // ---------- Call control ----------
+  async function ensureMic() {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+      return true;
+    } catch (e) {
+      log("mic permission failed", e);
+      return false;
+    }
+  }
+
+  async function startCall() {
+    callActive = true;
+    setState("speaking", "Connecting…");
+    const micOk = await ensureMic();            // permission prompt happens inside the click
+    if (!micOk) { speak(args.greeting, () => setState("ready", MIC_BLOCKED)); return; }
+    speak(args.greeting, listen);
+  }
+
+  function endCall(notify) {
+    callActive = false;
+    stopRecognition();
+    stopSpeaking();
+    clearTimeout(processingTimer);
+    heardEl.textContent = "";
+    setState("idle", "Call ended. Click the button to start a new voice call.");
+    if (notify) Streamlit.setValue({ type: "end_call", id: uid() });
+  }
+
+  mainBtn.addEventListener("click", function () {
+    if (state === "idle") startCall();
+    else if (state === "listening") { if (recognition) recognition.stop(); }
+    else if (state === "speaking") { stopSpeaking(); listen(); }
+    else if (state === "ready") listen();
+  });
+  endBtn.addEventListener("click", function () { endCall(true); });
+
+  // ---------- Receive data from Python ----------
+  function onRender(event) {
+    args = event.data.args || args;
+    const theme = event.data.theme;
+    if (theme && theme.textColor) document.body.style.color = theme.textColor;
+
+    if (!initialised) {                       // first render: don't replay old replies
+      initialised = true;
+      lastSpokenId = args.speak_id;
+      lastEpoch = args.epoch;
+      setState("idle");
+      return;
+    }
+    if (args.epoch !== lastEpoch) {           // "Start new conversation" was clicked
+      lastEpoch = args.epoch;
+      lastSpokenId = args.speak_id;
+      endCall(false);
+      return;
+    }
+    if (args.speak_id > lastSpokenId) {       // a NEW reply to speak (never repeats)
+      lastSpokenId = args.speak_id;
+      clearTimeout(processingTimer);
+      if (callActive) {
+        stopRecognition();
+        speak(args.speak_text, listen);       // after speaking, listen again
+      }
+    }
+  }
+
+  window.addEventListener("message", function (event) {
+    if (event.data && event.data.type === "streamlit:render") onRender(event);
+  });
+  Streamlit.ready();
+  resize();
+})();
+</script>
+</body>
+</html>

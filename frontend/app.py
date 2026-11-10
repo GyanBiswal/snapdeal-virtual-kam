@@ -5,16 +5,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
+import streamlit.components.v1 as components
 
-from backend.agent.seller_agent import INVESTIGATION_TOPICS, SellerAgent
+from backend.agent.seller_agent import SellerAgent
 from backend.analysis.seller_analysis import format_inr
 
 st.set_page_config(page_title="Snapdeal Virtual KAM", page_icon="📞", layout="wide")
+
+# Custom component: plain HTML/JS (no npm build) doing speech-to-text + text-to-speech in the browser
+voice_component = components.declare_component(
+    "kam_voice", path=str(Path(__file__).resolve().parent / "voice_component")
+)
 
 
 # ---------- Session setup ----------
 
 def init_session():
+    # These survive "Start new conversation" so voice events are never replayed or skipped
+    st.session_state.setdefault("speak_id", 0)
+    st.session_state.setdefault("speak_text", "")
+    st.session_state.setdefault("epoch", 0)
+    st.session_state.setdefault("last_voice_id", None)
     if "agent" not in st.session_state:
         agent = SellerAgent()
         st.session_state.agent = agent
@@ -31,6 +42,21 @@ seller, last, this, ch = (
     report["seller"], report["last_month"], report["this_month"], report["changes"],
 )
 
+
+def handle_user_message(text: str) -> None:
+    """Send a message (typed or spoken) to the agent and queue the reply to be spoken."""
+    result = agent.respond(text)
+    if result.ok:
+        st.session_state.transcript.append({"role": "user", "content": text})
+        st.session_state.transcript.append({"role": "assistant", "content": result.text})
+        st.session_state.last_error = None
+    else:
+        st.session_state.last_error = result.text
+    # The voice component speaks this if a call is active (each speak_id is used once)
+    st.session_state.speak_text = result.text
+    st.session_state.speak_id += 1
+
+
 # ---------- Sidebar ----------
 
 with st.sidebar:
@@ -38,6 +64,8 @@ with st.sidebar:
     if st.button("Start new conversation", use_container_width=True):
         for key in ("agent", "transcript", "last_error"):
             st.session_state.pop(key, None)
+        st.session_state.speak_text = ""
+        st.session_state.epoch += 1  # tells the voice component to end any active call
         st.rerun()
 
     with st.expander("Debug: agent state"):
@@ -99,34 +127,47 @@ with st.expander("Possible factors flagged by the data (to be investigated, not 
 
 st.divider()
 
-# ---------- Conversation ----------
+# ---------- Conversation (voice + text) ----------
 
 st.subheader("Conversation with your KAM")
-st.caption("🎤 Voice input is coming in the next phase. For now, type your message below.")
+st.caption("Click the button to start a voice call (use Google Chrome). You can always type below instead.")
+
+voice_event = voice_component(
+    greeting=agent.greeting(),
+    speak_text=st.session_state.speak_text,
+    speak_id=st.session_state.speak_id,
+    epoch=st.session_state.epoch,
+    key="kam_voice",
+    default=None,
+)
 
 chat_area = st.container()
+user_input = st.chat_input("Type your message to the KAM...")
+
+# Decide whether there is a NEW message to process (spoken or typed)
+pending_text = None
+if (
+    isinstance(voice_event, dict)
+    and voice_event.get("type") == "utterance"  # "end_call" events are ignored for now
+    and voice_event.get("id") != st.session_state.last_voice_id  # never process the same utterance twice
+):
+    st.session_state.last_voice_id = voice_event["id"]
+    pending_text = voice_event.get("text", "")
+elif user_input:
+    pending_text = user_input
+
 with chat_area:
     for msg in st.session_state.transcript:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+    if pending_text:
+        with st.chat_message("user"):
+            st.markdown(pending_text)
+        with st.spinner("KAM is thinking..."):
+            handle_user_message(pending_text)
+
+if pending_text:
+    st.rerun()  # re-render so the transcript updates and the component receives the reply to speak
 
 if st.session_state.last_error:
     st.warning(st.session_state.last_error)
-
-user_input = st.chat_input("Type your message to the KAM...")
-
-if user_input:
-    # Show the seller's message immediately, then wait for the agent
-    with chat_area:
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        with st.spinner("KAM is thinking..."):
-            result = agent.respond(user_input)
-
-    if result.ok:
-        st.session_state.transcript.append({"role": "user", "content": user_input})
-        st.session_state.transcript.append({"role": "assistant", "content": result.text})
-        st.session_state.last_error = None
-    else:
-        st.session_state.last_error = result.text
-    st.rerun()
