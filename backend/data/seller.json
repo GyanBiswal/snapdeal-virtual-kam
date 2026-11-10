@@ -1,0 +1,23 @@
+{
+  "_note": "SAMPLE DATA for the assignment demo. Seller name and category are illustrative, not a real seller.",
+  "seller_id": "SELLER-001",
+  "seller_name": "Rahul Sharma (sample seller)",
+  "business_name": "Sharma Home Essentials (sample)",
+  "category": "Home & Kitchen",
+  "metrics": {
+    "last_month": {
+      "sales": 200000,
+      "orders": 400,
+      "cancellation_rate": 8,
+      "avg_selling_price": 500,
+      "out_of_stock_products": 5
+    },
+    "this_month": {
+      "sales": 135000,
+      "orders": 270,
+      "cancellation_rate": 14,
+      "avg_selling_price": 500,
+      "out_of_stock_products": 18
+    }
+  }
+}
