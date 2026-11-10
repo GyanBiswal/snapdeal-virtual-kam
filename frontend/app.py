@@ -9,6 +9,7 @@ import streamlit.components.v1 as components
 
 from backend.agent.seller_agent import SellerAgent
 from backend.analysis.seller_analysis import format_inr
+from backend.agent.call_summary import build_call_summary, summary_to_markdown
 
 st.set_page_config(page_title="Snapdeal Virtual KAM", page_icon="📞", layout="wide")
 
@@ -26,6 +27,7 @@ def init_session():
     st.session_state.setdefault("speak_text", "")
     st.session_state.setdefault("epoch", 0)
     st.session_state.setdefault("last_voice_id", None)
+    st.session_state.setdefault("show_summary", False)
     if "agent" not in st.session_state:
         agent = SellerAgent()
         st.session_state.agent = agent
@@ -55,6 +57,7 @@ def handle_user_message(text: str) -> None:
     # The voice component speaks this if a call is active (each speak_id is used once)
     st.session_state.speak_text = result.text
     st.session_state.speak_id += 1
+    st.session_state.show_summary = agent.state.complete  # auto-show once the agent closes the call
 
 
 # ---------- Sidebar ----------
@@ -65,7 +68,12 @@ with st.sidebar:
         for key in ("agent", "transcript", "last_error"):
             st.session_state.pop(key, None)
         st.session_state.speak_text = ""
+        st.session_state.show_summary = False
         st.session_state.epoch += 1  # tells the voice component to end any active call
+        st.rerun()
+
+    if st.button("Show call summary", use_container_width=True):
+        st.session_state.show_summary = True
         st.rerun()
 
     with st.expander("Debug: agent state"):
@@ -73,8 +81,9 @@ with st.sidebar:
         st.write("Topics covered:", ", ".join(sorted(s.covered_topics)) or "none")
         st.write("Last question was about:", s.pending_topic or "none")
         st.write("Seller facts:", s.seller_facts or "none")
-        st.write("Recommendations given:", s.recommendations_given)
+        st.write("Recommendations:", s.recommendations or "none")
         st.write("Agreed actions:", s.agreed_actions or "none")
+        st.write("Conversation complete:", s.complete)
 
 # ---------- Header + seller info ----------
 
@@ -137,6 +146,7 @@ voice_event = voice_component(
     speak_text=st.session_state.speak_text,
     speak_id=st.session_state.speak_id,
     epoch=st.session_state.epoch,
+    call_complete=agent.state.complete,
     key="kam_voice",
     default=None,
 )
@@ -144,16 +154,15 @@ voice_event = voice_component(
 chat_area = st.container()
 user_input = st.chat_input("Type your message to the KAM...")
 
-# Decide whether there is a NEW message to process (spoken or typed)
+# Decide whether there is a NEW event to handle (spoken message, End call click, or typed message)
 pending_text = None
-if (
-    isinstance(voice_event, dict)
-    and voice_event.get("type") == "utterance"  # "end_call" events are ignored for now
-    and voice_event.get("id") != st.session_state.last_voice_id  # never process the same utterance twice
-):
-    st.session_state.last_voice_id = voice_event["id"]
-    pending_text = voice_event.get("text", "")
-elif user_input:
+if isinstance(voice_event, dict) and voice_event.get("id") != st.session_state.last_voice_id:
+    st.session_state.last_voice_id = voice_event["id"]  # never handle the same event twice
+    if voice_event.get("type") == "utterance":
+        pending_text = voice_event.get("text", "")
+    elif voice_event.get("type") == "end_call":
+        st.session_state.show_summary = True
+if pending_text is None and user_input:
     pending_text = user_input
 
 with chat_area:
@@ -171,3 +180,9 @@ if pending_text:
 
 if st.session_state.last_error:
     st.warning(st.session_state.last_error)
+
+if st.session_state.show_summary:
+    summary = build_call_summary(report, agent.state)
+    with st.container(border=True):
+        st.subheader("📋 Call summary")
+        st.markdown(summary_to_markdown(summary))

@@ -20,6 +20,7 @@ def _json(reply="Test reply?", **extra):
         "agreed_actions": [],
         "conversation_complete": False,
         "topic_asked": None,
+        "recommendations": [],
     }
     data.update(extra)
     return json.dumps(data)
@@ -115,11 +116,18 @@ def test_invalid_api_key():
     assert not result.ok and result.error_type == "invalid_api_key"
 
 
-def test_agreed_actions_ignored_before_recommendations():
-    client = FakeClient([_json(agreed_actions=["Restock best-sellers"])])
+def test_volunteered_commitment_is_recorded():
+    client = FakeClient([_json("Thanks for committing.", agreed_actions=["Replenish three best-sellers"])])
     agent = SellerAgent(client=client)
-    agent.respond("sure, I'll restock")
-    assert agent.state.agreed_actions == []
+    agent.respond("I will replenish my three best-sellers")
+    assert agent.state.agreed_actions == ["Replenish three best-sellers"]
+
+
+def test_conversation_can_complete_without_recommendations():
+    client = FakeClient([_json("Goodbye.", conversation_complete=True)])
+    agent = SellerAgent(client=client)
+    agent.respond("that's all, thanks")
+    assert agent.state.complete
 
 
 def test_agreed_actions_recorded_after_recommendations():
@@ -137,3 +145,16 @@ def test_model_not_found_falls_back_to_second_model():
     client = FakeClient([err, _json("Fallback reply")])
     result = SellerAgent(client=client).respond("hello")
     assert result.ok and client.calls == 2
+
+def test_recommendations_captured_once():
+    client = FakeClient([
+        _json("Here are three ideas...", recommendations_given=True,
+              recommendations=["Restock best-sellers", "Check cancellation reasons", "Review views"]),
+        _json("Anything else?", recommendations_given=True, recommendations=["Different list"]),
+    ])
+    agent = SellerAgent(client=client)
+    agent.respond("what should I do?")
+    agent.respond("ok")
+    assert agent.state.recommendations == [
+        "Restock best-sellers", "Check cancellation reasons", "Review views",
+    ]

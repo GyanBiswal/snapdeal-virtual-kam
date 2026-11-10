@@ -56,7 +56,7 @@
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const LANG = "en-IN";
 
-  let args = { greeting: "", speak_text: "", speak_id: 0, epoch: 0 };
+  let args = { greeting: "", speak_text: "", speak_id: 0, epoch: 0, call_complete: false };
   let initialised = false;
   let lastSpokenId = 0;
   let lastEpoch = 0;
@@ -280,7 +280,9 @@
       clearTimeout(processingTimer);
       if (callActive) {
         stopRecognition();
-        speak(args.speak_text, listen);       // after speaking, listen again
+        // When the conversation is complete, end the call after the closing recap instead of listening again
+        const after = args.call_complete ? function () { endCall(false); } : listen;
+        speak(args.speak_text, after);
       }
     }
   }

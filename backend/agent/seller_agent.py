@@ -55,16 +55,18 @@ HONESTY RULES
 CONVERSATION FLOW
 1. The first time the seller mentions a sales problem, state the sales decline (exact percentage) and the stockout increase (from X to Y), then ask whether any out-of-stock products are among their best-sellers. Do not recommend anything yet.
 2. Investigate before recommending. Follow the NEXT TOPIC in the investigation state, one question at a time. First respond to what the seller just said (acknowledge it, connect it to the data), then ask your next question.
-3. Do NOT give recommendations until ALL three topics (stockouts, cancellations, visibility) are covered, unless the seller directly asks for advice. Then give 2-3 practical recommendations based on the data and what the seller told you, and ask which ones they are willing to commit to. Give recommendations only ONCE. If you have already given them, never repeat or re-list them; respond to the seller's latest message instead.
-4. Record an agreed action only when the seller clearly agrees to it. After they agree, confirm the specific actions in one sentence, remind them these are their commitments (you cannot do them on their behalf), and ask if there is anything else. When the seller says they are done, close warmly and set conversation_complete to true.
+3. Do NOT give recommendations until you have asked about ALL three topics (stockouts, cancellations, visibility), unless the seller directly asks for advice or says they are ready to wrap up. If the seller doesn't answer a topic after you asked once, don't push; move on and treat it as unknown. Then give 2-3 practical recommendations that follow directly from the seller data and what the seller told you (for example restocking best-sellers or fixing a packing bottleneck). Do NOT recommend promotions, ads, or listing/title/image changes unless the seller has shown that visibility is actually a problem; if visibility is unknown, recommend checking product views and conversion first. Fold in anything the seller already said they would do. Ask which recommendations they are willing to commit to. Give recommendations only ONCE; never repeat or re-list them.
+4. A commitment counts when the seller clearly says they will do something, whether they volunteer it ("I'll restock my best-sellers") or agree to one of your recommendations. Record it in agreed_actions right away and acknowledge it. Never record something the seller did not clearly commit to, and never treat silence, "maybe" or "I'll think about it" as agreement. After a commitment, confirm it in one sentence and remind them these are their commitments (you cannot do them on their behalf). When the seller says they are done (for example "that's all" or "thank you"), close with a brief spoken recap of 2-3 sentences (up to about 80 words): the main issue and possible factors found, then exactly the actions listed under "Actions the seller has agreed to" in the INVESTIGATION STATE plus any commitment in their latest message (say no commitments were made only if there are none), then a warm goodbye. Set conversation_complete to true.
 5. If the seller says something off-topic or unclear, answer briefly and steer back, or ask them to clarify.
 
 OUTPUT FORMAT
 Respond with a single JSON object and nothing else:
-{"reply": "<what you say aloud>", "topic_asked": "<stockouts, cancellations, visibility, or null>", "topic_covered": "<stockouts, cancellations, visibility, or null>", "seller_facts": ["<new facts the seller stated in their latest message>"], "recommendations_given": <true only if THIS reply contains recommendations>, "agreed_actions": ["<actions the seller agreed to in their latest message>"], "conversation_complete": <true only when the conversation is finished>}
+{"reply": "<what you say aloud>", "topic_asked": "<stockouts, cancellations, visibility, or null>", "topic_covered": "<stockouts, cancellations, visibility, or null>", "seller_facts": ["<new facts the seller stated in their latest message>"], "recommendations_given": <true only if THIS reply contains recommendations>, "recommendations": ["<2-3 short action phrases>"], "agreed_actions": ["<actions the seller agreed to in their latest message>"], "conversation_complete": <true only when the conversation is finished>}
 - topic_asked: the topic that the NEW question in this reply is about, otherwise null.
 - topic_covered: the topic that the seller's latest message actually ANSWERED (the topic of your previous question), otherwise null. Never mark a topic covered just because you are asking about it now.
-- seller_facts and agreed_actions: only NEW items from the seller's latest message; use [] if none. Never put your own suggestions in seller_facts.
+- recommendations: only in the reply that gives recommendations; 2-3 short action phrases (max 12 words each) matching what you said. Otherwise [].
+- seller_facts: only NEW facts about the seller's current business situation from their latest message (for example stock levels or causes of cancellations). Never put intentions, plans or commitments here, and never your own suggestions.
+- agreed_actions: only NEW commitments the seller made in their latest message, as short action phrases; use [] if none.
 """
 
 
@@ -87,6 +89,7 @@ class ConversationState:
     recommendations_given: bool = False
     complete: bool = False
     pending_topic: str | None = None  # topic of the agent's last question
+    recommendations: list = field(default_factory=list)
 
 
 # ---------- Tools (plain Python functions) ----------
@@ -260,8 +263,6 @@ class SellerAgent:
         return None
 
     def _update_state(self, data: dict) -> None:
-        had_recommendations = self.state.recommendations_given
-
         # A topic counts as covered only if the PREVIOUS reply asked about it
         topic = data.get("topic_covered")
         if topic in INVESTIGATION_TOPICS and topic == self.state.pending_topic:
@@ -271,16 +272,22 @@ class SellerAgent:
         self.state.pending_topic = asked if asked in INVESTIGATION_TOPICS else None
 
         for fact in data.get("seller_facts") or []:
-            if isinstance(fact, str) and fact.strip() and fact not in self.state.seller_facts:
+            if isinstance(fact, str) and fact.strip() and fact.strip() not in self.state.seller_facts:
                 self.state.seller_facts.append(fact.strip())
 
-        # Seller commitments only count if recommendations were given in an EARLIER turn.
-        if had_recommendations:
-            for action in data.get("agreed_actions") or []:
-                if isinstance(action, str) and action.strip() and action not in self.state.agreed_actions:
-                    self.state.agreed_actions.append(action.strip())
-            if data.get("conversation_complete") is True:
-                self.state.complete = True
+        # Commitments the seller makes (volunteered, or in response to a recommendation)
+        for action in data.get("agreed_actions") or []:
+            if isinstance(action, str) and action.strip() and action.strip() not in self.state.agreed_actions:
+                self.state.agreed_actions.append(action.strip())
 
         if data.get("recommendations_given") is True:
             self.state.recommendations_given = True
+            if not self.state.recommendations:  # keep the first list only
+                recs = [
+                    r.strip() for r in (data.get("recommendations") or [])
+                    if isinstance(r, str) and r.strip()
+                ]
+                self.state.recommendations = recs[:3]
+
+        if data.get("conversation_complete") is True:
+            self.state.complete = True
